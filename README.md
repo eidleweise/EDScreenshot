@@ -1,4 +1,5 @@
 # EDScreenshot
+![image](https://github.com/user-attachments/assets/5dcf828b-2886-4186-9e1e-441a1ff63aa0)
 
 Just a quick python Script that I wrote to monitor the Elite Dangerous Journal file for a screenshot. Rename that Screenshot, convert it to a PNG and remove the original BMP
 
@@ -11,8 +12,6 @@ Hopefully it goes without saying that you'll need to update the shell script wit
 
 For what it's worth my copy of Elite is installed to `~/Games/umu/umu-default/drive_c/users/steamuser/Saved Games/Frontier Developments/Elite Dangerous`
  and my screenshots are in `~/Games/umu/umu-default/drive_c/users/steamuser/Pictures/Frontier Developments/Elite Dangerous`
-
- ![image](https://github.com/user-attachments/assets/5dcf828b-2886-4186-9e1e-441a1ff63aa0)
 
 
 Eid
