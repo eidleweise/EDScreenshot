@@ -1,5 +1,6 @@
 import argparse
 import os
+import sys
 import time
 import glob
 import json
@@ -108,6 +109,17 @@ def bmp_to_png(bmp_path):
         return None
 
 if __name__ == "__main__":
+    lock_file_name = f"EDScreenshot.lock"
+    try:
+        if os.path.exists(lock_file_name):
+            print(f"Error: File '{lock_file_name}' already exists. Exiting.")
+            sys.exit(1)
+        with open(lock_file_name, "w") as file:
+            file.write(datetime.now().strftime("%Y%m%d_%H%M%S"))
+        print(f"File '{lock_file_name}' created successfully.")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
     parser = argparse.ArgumentParser(description="Monitor Elite Dangerous journal files and process screenshots.")
     parser.add_argument("journal_folder", help="Path to the Elite Dangerous journal folder.")
     parser.add_argument("screenshot_folder", help="Path to the Elite Dangerous screenshot folder.")
@@ -131,4 +143,5 @@ if __name__ == "__main__":
         while True:
             time.sleep(1) #main thread does minimal work.
     except KeyboardInterrupt:
+        os.remove(lock_file_name)
         print("\nMonitoring stopped.")
