@@ -5,7 +5,7 @@ import time
 import glob
 import json
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
 from PIL import Image
 import threading
 import queue
@@ -110,15 +110,31 @@ def bmp_to_png(bmp_path):
 
 if __name__ == "__main__":
     lock_file_name = f"EDScreenshot.lock"
-    try:
-        if os.path.exists(lock_file_name):
-            print(f"Error: File '{lock_file_name}' already exists. Exiting.")
+    max_lock_age_seconds = 24 * 60 * 60  # 24 hours in seconds
+
+    if os.path.exists(lock_file_name):
+        try:
+            file_creation_time = os.path.getctime(lock_file_name)
+            current_time = time.time()
+            age_seconds = current_time - file_creation_time
+
+            if age_seconds > max_lock_age_seconds:
+                print(f"Warning: Lock file '{lock_file_name}' is older than 24 hours. Deleting it.")
+                os.remove(lock_file_name)
+            else:
+                age_timedelta = timedelta(seconds=int(age_seconds))
+                print(f"Error: Lock file '{lock_file_name}' exists and is {age_timedelta} old. Exiting.")
+                sys.exit(1)
+        except OSError as e:
+            print(f"Error accessing or deleting lock file '{lock_file_name}': {e}")
             sys.exit(1)
-        with open(lock_file_name, "w") as file:
-            file.write(datetime.now().strftime("%Y%m%d_%H%M%S"))
-        print(f"File '{lock_file_name}' created successfully.")
-    except Exception as e:
-        print(f"An error occurred: {e}")
+    else:
+        # Lock file does not exist, continue with your script
+        print(f"Lock file '{lock_file_name}' does not exist. Continuing execution.")
+        # You would typically create the lock file here before critical sections
+        with open(lock_file_name, "w") as f:
+            f.write(str(os.getpid())) # Optionally write the process ID to the lock file
+
 
     parser = argparse.ArgumentParser(description="Monitor Elite Dangerous journal files and process screenshots.")
     parser.add_argument("journal_folder", help="Path to the Elite Dangerous journal folder.")
@@ -143,5 +159,8 @@ if __name__ == "__main__":
         while True:
             time.sleep(1) #main thread does minimal work.
     except KeyboardInterrupt:
-        os.remove(lock_file_name)
-        print("\nMonitoring stopped.")
+        try:
+            os.remove(lock_file_name)
+            print("\nMonitoring stopped.")
+        except OSError as e:
+            print(f"Error accessing or deleting lock file '{lock_file_name}': {e}")
