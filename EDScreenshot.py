@@ -178,17 +178,18 @@ if __name__ == "__main__":
 
     if os.path.exists(lock_file_name):
         try:
-            file_creation_time = os.path.getctime(lock_file_name)
-            current_time = time.time()
-            age_seconds = current_time - file_creation_time
+            print(f"Lock file '{lock_file_name}' exists. This may mean another instance is running.")
+            choice = input("Do you want to remove it and continue? (y/n): ").lower().strip()
 
-            if age_seconds > max_lock_age_seconds:
-                print(f"Warning: Lock file '{lock_file_name}' is older than 24 hours. Deleting it.")
+            if choice == 'y':
                 os.remove(lock_file_name)
+                print("Lock file removed. Continuing.")
             else:
-                age_timedelta = timedelta(seconds=int(age_seconds))
-                print(f"Error: Lock file '{lock_file_name}' exists and is {age_timedelta} old. Exiting.")
+                print("Exiting.")
                 sys.exit(1)
+        except KeyboardInterrupt:
+            print("\nOperation cancelled. Exiting.")
+            sys.exit(1)
         except OSError as e:
             print(f"Error accessing or deleting lock file '{lock_file_name}': {e}")
             sys.exit(1)
