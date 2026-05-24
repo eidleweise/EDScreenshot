@@ -1,0 +1,5 @@
+.venv
+.idea
+
+/ed_screenshot.log
+/EDScreenshot.lock
