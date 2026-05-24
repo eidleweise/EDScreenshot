@@ -5,11 +5,48 @@ import time
 import glob
 import json
 import shutil
-from datetime import datetime, timedelta
+from datetime import datetime
 from PIL import Image
 import threading
-import queue
 import pillow_jxl
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+try:
+    import pygame
+    pygame.mixer.init()
+    _SOUND_AVAILABLE = True
+except (ImportError, pygame.error):
+    _SOUND_AVAILABLE = False
+
+_SUPPORTED_SOUND_FORMATS = ('.ogg', '.wav', '.mp3')
+_NOTIFICATION_COOLDOWN = 2.0  # seconds — suppress repeated sounds within this window
+_last_notification_time = 0.0
+_notification_sound_path = None  # Set from CLI argument
+
+
+def play_notification():
+    """Play the notification sound in a background thread, debounced to avoid spam."""
+    global _last_notification_time
+
+    if not _SOUND_AVAILABLE or not _notification_sound_path:
+        return
+
+    now = time.time()
+    if now - _last_notification_time < _NOTIFICATION_COOLDOWN:
+        return
+    _last_notification_time = now
+
+    def _play():
+        try:
+            sound = pygame.mixer.Sound(_notification_sound_path)
+            sound.play()
+            while pygame.mixer.get_busy():
+                time.sleep(0.05)
+        except Exception as e:
+            print(f"Error playing notification sound: {e}")
+
+    threading.Thread(target=_play, daemon=True).start()
 
 
 def get_latest_log_file(folder_path):
@@ -20,61 +57,125 @@ def get_latest_log_file(folder_path):
     return latest_file
 
 
-def monitor_folder_thread(folder_path, journal_queue, interval=5):
-    most_recent_logfile = None
-    while True:
-        latest_log = get_latest_log_file(folder_path)
-        if latest_log:
-            if latest_log != most_recent_logfile:
-                most_recent_logfile = latest_log
-                journal_queue.put(most_recent_logfile)
-        else:
-            if most_recent_logfile is not None:
-                most_recent_logfile = None
-                journal_queue.put(None)
-        time.sleep(interval)
+class JournalHandler(FileSystemEventHandler):
+    """Watches the journal folder and tails new lines from the latest log file."""
 
+    def __init__(self, screenshot_path, export_format, create_system_folder, name_format):
+        super().__init__()
+        self.screenshot_path = screenshot_path
+        self.export_format = export_format
+        self.create_system_folder = create_system_folder
+        self.name_format = name_format
+        self.current_journal = None
+        self.file_position = 0
+        self._lock = threading.Lock()
 
-def process_journal_thread(journal_queue, screenshot_path, export_format="PNG", create_system_folder=True, interval=1):
-    current_journal = None
-    last_line = None
-    while True:
+    def start(self, journal_folder):
+        """Seek to end of the current latest journal so we only process new events."""
+        latest = get_latest_log_file(journal_folder)
+        if latest:
+            self.current_journal = latest
+            self.file_position = os.path.getsize(latest)
+            print(f"Monitoring {self.current_journal} (tailing from end)")
+
+    def on_modified(self, event):
+        if event.is_directory:
+            return
+        if not event.src_path.endswith('.log'):
+            return
+        with self._lock:
+            self._process_changes(event.src_path)
+
+    def on_created(self, event):
+        if event.is_directory:
+            return
+        if not event.src_path.endswith('.log'):
+            return
+        with self._lock:
+            # New journal file started — switch to it
+            self.current_journal = event.src_path
+            self.file_position = 0
+            print(f"New journal detected: {self.current_journal}")
+            self._process_changes(event.src_path)
+
+    def _process_changes(self, changed_path):
+        # Only process the current (latest) journal
+        if self.current_journal is None:
+            self.current_journal = changed_path
+            self.file_position = 0
+
+        # If a newer journal appeared via modification, switch to it
+        if changed_path != self.current_journal:
+            if os.path.getmtime(changed_path) > os.path.getmtime(self.current_journal):
+                self.current_journal = changed_path
+                self.file_position = 0
+                print(f"Switched to newer journal: {self.current_journal}")
+
+        if changed_path != self.current_journal:
+            return
+
         try:
-            journal_file = journal_queue.get(block=False)
-            if journal_file is not None:
-                current_journal = journal_file
-                print(f"Monitoring {current_journal}")
-                last_line = None  # reset when new file is passed.
-        except queue.Empty:
-            pass  # No new journal, continue processing current
+            with open(self.current_journal, 'r', encoding='utf-8') as f:
+                f.seek(self.file_position)
+                new_lines = f.readlines()
+                self.file_position = f.tell()
 
-        if current_journal:
-            try:
-                with open(current_journal, 'r') as f:
-                    lines = f.readlines()
-                    if lines:
-                        current_last_line = lines[-1].strip()
-                        if current_last_line != last_line:
-                            last_line = current_last_line
-                            try:
-                                journal_data = json.loads(current_last_line)
-                                if journal_data["event"] == "Screenshot":
-                                    process_screenshot(screenshot_path, journal_data, create_system_folder,
-                                                       export_format)
-                            except json.JSONDecodeError:
-                                pass
-                            except Exception as e:
-                                print(f"Error processing journal line: {e}")
-            except FileNotFoundError:
-                print(f"Journal file not found: {current_journal}")
-            except PermissionError:
-                print(f"Permission denied to read journal file: {current_journal}")
-            except Exception as e:
-                print(f"Error reading journal: {e}")
-        time.sleep(interval)
+            for line in new_lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    journal_data = json.loads(line)
+                    if journal_data.get("event") == "Screenshot":
+                        process_screenshot(self.screenshot_path, journal_data,
+                                           self.create_system_folder, self.export_format,
+                                           self.name_format)
+                except json.JSONDecodeError:
+                    continue
+                except Exception as e:
+                    print(f"Error processing journal line: {e}")
+
+        except FileNotFoundError:
+            print(f"Journal file not found: {self.current_journal}")
+        except PermissionError:
+            print(f"Permission denied: {self.current_journal}")
+        except Exception as e:
+            print(f"Error reading journal: {e}")
 
 
-def process_screenshot(elite_screenshot_input_path, journal_entry, make_system_name=True, output_format="PNG"):
+def build_filename(name_format, journal_entry):
+    """Build a filename from a format string and journal entry data.
+
+    Available placeholders:
+        {system}    - Star system name
+        {body}      - Body name
+        {timestamp} - Combined date+time as YYYYMMDD_HHMMSS
+        {date}      - Date as YYYY-MM-DD
+        {time}      - Time as HH-MM-SS
+        {datetime}  - Date and time as YYYY-MM-DD_HH-MM-SS
+    """
+    now = datetime.now()
+    system = journal_entry.get("System", "UnknownSystem").replace(":", "-")
+    body = journal_entry.get("Body", "UnknownBody").replace(":", "-")
+
+    replacements = {
+        "system": system,
+        "body": body,
+        "timestamp": now.strftime("%Y%m%d_%H%M%S"),
+        "date": now.strftime("%Y-%m-%d"),
+        "time": now.strftime("%H-%M-%S"),
+        "datetime": now.strftime("%Y-%m-%d_%H-%M-%S"),
+    }
+
+    try:
+        return name_format.format(**replacements)
+    except KeyError as e:
+        print(f"Unknown placeholder in name format: {e}. Using default.")
+        return f"{system}_{body}_{replacements['timestamp']}"
+
+
+def process_screenshot(elite_screenshot_input_path, journal_entry, make_system_name=True, output_format="PNG",
+                       name_format="{system}_{body}_{timestamp}"):
     output_format = output_format.upper()  # Normalize to uppercase
     try:
         if journal_entry["event"] == "Screenshot":
@@ -83,9 +184,8 @@ def process_screenshot(elite_screenshot_input_path, journal_entry, make_system_n
             image_file_name = os.path.basename(image_name)
             abs_image_file_name = os.path.join(elite_screenshot_input_path, image_file_name)
             system = journal_entry.get("System", "UnknownSystem").replace(":", "-")
-            body = journal_entry.get("Body", "UnknownBody").replace(":", "-")
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            new_filename = f"{system}_{body}_{timestamp}.bmp"
+
+            new_filename = build_filename(name_format, journal_entry) + ".bmp"
 
             if make_system_name:
                 new_abs_bmp_file_name = os.path.join(elite_screenshot_input_path, system, new_filename)
@@ -98,10 +198,13 @@ def process_screenshot(elite_screenshot_input_path, journal_entry, make_system_n
 
             if output_format == "PNG":
                 bmp_to_png(new_abs_bmp_file_name, True)
+                play_notification()
             elif output_format == "JPG":
                 bmp_to_jpg(new_abs_bmp_file_name, True)
+                play_notification()
             elif output_format == "JXL":
                 bmp_to_jxl(new_abs_bmp_file_name, True, True)
+                play_notification()
             else:
                 print(f"Unknown output format {output_format}")
     except KeyError:
@@ -172,33 +275,57 @@ def bmp_to_jxl(bmp_path, delete_original=True, lossless_val=True):
         return None
 
 
-if __name__ == "__main__":
-    lock_file_name = f"EDScreenshot.lock"
-    max_lock_age_seconds = 24 * 60 * 60  # 24 hours in seconds
+def is_pid_alive(pid):
+    """Check whether a process with the given PID is still running (cross-platform)."""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)  # Signal 0: no kill, just check existence
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but we don't have permission to signal it — still alive
+        return True
+    return True
 
-    if os.path.exists(lock_file_name):
+
+def acquire_lock(lock_path):
+    """Acquire a PID-based lock file. Returns True if lock acquired, False if another instance is running."""
+    if os.path.exists(lock_path):
         try:
-            print(f"Lock file '{lock_file_name}' exists. This may mean another instance is running.")
-            choice = input("Do you want to remove it and continue? (y/n): ").lower().strip()
+            with open(lock_path, "r") as f:
+                old_pid = int(f.read().strip())
+        except (ValueError, OSError):
+            old_pid = -1
 
-            if choice == 'y':
-                os.remove(lock_file_name)
-                print("Lock file removed. Continuing.")
-            else:
-                print("Exiting.")
-                sys.exit(1)
-        except KeyboardInterrupt:
-            print("\nOperation cancelled. Exiting.")
-            sys.exit(1)
-        except OSError as e:
-            print(f"Error accessing or deleting lock file '{lock_file_name}': {e}")
-            sys.exit(1)
-    else:
-        # Lock file does not exist, continue with your script
-        print(f"Lock file '{lock_file_name}' does not exist. Continuing execution.")
-        # You would typically create the lock file here before critical sections
-        with open(lock_file_name, "w") as f:
-            f.write(str(os.getpid()))  # Optionally write the process ID to the lock file
+        if is_pid_alive(old_pid):
+            return False  # Another instance is genuinely running
+
+        # Stale lock from a dead process — reclaim it
+        print(f"Removing stale lock file (PID {old_pid} is no longer running).")
+
+    with open(lock_path, "w") as f:
+        f.write(str(os.getpid()))
+    return True
+
+
+def release_lock(lock_path):
+    """Remove the lock file if it belongs to us."""
+    try:
+        with open(lock_path, "r") as f:
+            pid = int(f.read().strip())
+        if pid == os.getpid():
+            os.remove(lock_path)
+    except (ValueError, OSError):
+        pass
+
+
+if __name__ == "__main__":
+    lock_file_name = "EDScreenshot.lock"
+
+    if not acquire_lock(lock_file_name):
+        print("Another instance is already running. Exiting.")
+        sys.exit(1)
 
     parser = argparse.ArgumentParser(description="Monitor Elite Dangerous journal files and process screenshots.")
     parser.add_argument("journal_folder", help="Path to the Elite Dangerous journal folder.")
@@ -206,36 +333,54 @@ if __name__ == "__main__":
     parser.add_argument("export_format", nargs='?', default="PNG", help="Export as PNG (default), JPG or JXL")
     parser.add_argument("create_system_folder", nargs='?', type=lambda x: (str(x).lower() == 'true'), default=True,
                         help="Rather than exporting in the image to the main Elite Dangerous images folder, export them to image_folder/system_name (True/False)")
+    parser.add_argument("--name_format", default="{system}_{body}_{timestamp}",
+                        help="Filename format template. Available placeholders: "
+                             "{system}, {body}, {timestamp}, {date}, {time}, {datetime}. "
+                             "Default: '{system}_{body}_{timestamp}'")
+    parser.add_argument("--notification_sound", default=None,
+                        help="Path to a sound file (.ogg, .wav, .mp3) to play after processing. "
+                             "If not provided, no sound is played.")
 
     args = parser.parse_args()
+
+    # Validate and set notification sound
+    if args.notification_sound:
+        sound_path = os.path.abspath(args.notification_sound)
+        if not os.path.exists(sound_path):
+            print(f"Warning: Notification sound not found: {sound_path} — running silent.")
+        elif not sound_path.lower().endswith(_SUPPORTED_SOUND_FORMATS):
+            print(f"Warning: Unsupported sound format. Use .ogg, .wav, or .mp3 — running silent.")
+        else:
+            _notification_sound_path = sound_path
 
     print("Parsed Arguments:")
     for arg_name, arg_value in vars(args).items():
         print(f"\t{arg_name}: {arg_value}")
 
-    folder_to_monitor = args.journal_folder
-    elite_screenshot_path = args.screenshot_folder
+    journal_folder = args.journal_folder
+    screenshot_path = args.screenshot_folder
     export_format = args.export_format
     create_system_folder = args.create_system_folder
+    name_format = args.name_format
 
-    journal_queue = queue.Queue()
+    if not os.path.isdir(journal_folder):
+        print(f"Error: Journal folder does not exist: {journal_folder}")
+        release_lock(lock_file_name)
+        sys.exit(1)
 
-    folder_thread = threading.Thread(target=monitor_folder_thread, args=(folder_to_monitor, journal_queue))
-    process_thread = threading.Thread(target=process_journal_thread,
-                                      args=(journal_queue, elite_screenshot_path, export_format, create_system_folder))
+    handler = JournalHandler(screenshot_path, export_format, create_system_folder, name_format)
+    handler.start(journal_folder)
 
-    folder_thread.daemon = True
-    process_thread.daemon = True
-
-    folder_thread.start()
-    process_thread.start()
+    observer = Observer()
+    observer.schedule(handler, journal_folder, recursive=False)
+    observer.start()
+    print(f"Watching journal folder: {journal_folder}")
 
     try:
         while True:
-            time.sleep(1)  # main thread does minimal work.
+            time.sleep(1)
     except KeyboardInterrupt:
-        try:
-            os.remove(lock_file_name)
-            print("\nMonitoring stopped.")
-        except OSError as e:
-            print(f"Error accessing or deleting lock file '{lock_file_name}': {e}")
+        observer.stop()
+        observer.join()
+        release_lock(lock_file_name)
+        print("\nMonitoring stopped.")

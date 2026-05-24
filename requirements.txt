@@ -1,2 +1,4 @@
 pillow
 pillow-jxl-plugin
+watchdog
+pygame
