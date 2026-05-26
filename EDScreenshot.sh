@@ -1,5 +1,44 @@
 #!/bin/bash
-
+#
+# EDScreenshot - Elite Dangerous Screenshot Monitor
+#
+# This script monitors Elite Dangerous journal files and automatically processes screenshots.
+# It sets up a Python virtual environment and runs the EDScreenshot.py monitoring service.
+#
+# USAGE:
+#   ./EDScreenshot.sh                                       # Run with default configuration
+#   ./EDScreenshot.sh --name_format "{system}_{timestamp}"  # Custom filename format
+#   ./EDScreenshot.sh --notification_sound /path/to/sound   # Custom notification sound
+#
+# OPTIONAL ARGUMENTS:
+#
+#   --name_format <FORMAT>
+#       Filename format template for processed screenshots.
+#       Available placeholders:
+#         {system}    - Star system name
+#         {body}      - Body name
+#         {timestamp} - Combined date+time as YYYYMMDD_HHMMSS
+#         {date}      - Date as YYYY-MM-DD
+#         {time}      - Time as HH-MM-SS
+#         {datetime}  - Date and time as YYYY-MM-DD_HH-MM-SS
+#       Default: "{system}_{body}_{timestamp}"
+#       Example: --name_format "{system}_{body}_{timestamp}"
+#
+#   --notification_sound <PATH>
+#       Path to a sound file to play after processing a screenshot.
+#       Supported formats: .ogg, .wav, .mp3
+#       If not provided, no sound will be played after screenshots are processed.
+#       Example: --notification_sound "/path/to/sound.ogg"
+#
+# ENVIRONMENT CONFIGURATION:
+#
+#   The following variables can be edited in this script for custom configuration:
+#
+#     JOURNAL_FOLDER         - Path to Elite Dangerous journal files
+#     SCREENSHOT_FOLDER      - Path to Elite Dangerous screenshots
+#     EXPORT_FORMAT          - Output format: PNG, JPG, or JXL (default: PNG)
+#     CREATE_SYSTEM_FOLDER   - Organize screenshots by system folder (default: TRUE)
+#
 # --- Configuration ---
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VENV_PATH="$PROJECT_DIR/.venv"
